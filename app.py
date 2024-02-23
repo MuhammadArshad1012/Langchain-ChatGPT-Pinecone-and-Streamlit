@@ -1,74 +1,79 @@
-import fitz  # PyMuPDF
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.chat_models import ChatOpenAI
-from langchain.chains import ConversationChain
-from langchain.chains.conversation.memory import ConversationBufferWindowMemory
-from langchain.prompts import (
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-    ChatPromptTemplate,
-    MessagesPlaceholder
-)
+from langchain.document_loaders import DirectoryLoader
+from langchain.text_splitter import CharacterTextSplitter
+import os
+import pinecone 
+from langchain.vectorstores import Pinecone
+from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.chat_models import ChatOpenAI
 import streamlit as st
-from streamlit_chat import message
-from utils import *  # Assuming 'utils' module is defined
+from dotenv import load_dotenv
 
-file_path = 'pdf information.pdf'
-class Document:
-    def __init__(self, page_content, metadata=None):
-        self.page_content = page_content
-        self.metadata = metadata
-def load_docs(file_path):
-    try:
-        # Extract text from the PDF file
-        with fitz.open(file_path) as pdf_document:
-            documents = [Document(page.get_text(), metadata={'page_number': i + 1}) for i, page in enumerate(pdf_document)]
-        return documents
-    except FileNotFoundError:
-        print(f"File not found: '{file_path}'")
-        return []
-documents = load_docs(file_path)
-print(len(documents))
-def split_docs(documents, chunk_size=500, chunk_overlap=20):
-    # Use the RecursiveCharacterTextSplitter with the Document objects
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    docs = text_splitter.split_documents(documents)
-    return docs
-docs = split_docs(documents)
+load_dotenv()
 
-# Initialize session state keys
-if 'responses' not in st.session_state:
-    st.session_state['responses'] = []
-if 'requests' not in st.session_state:
-    st.session_state['requests'] = []
-if 'buffer_memory' not in st.session_state:
-    st.session_state.buffer_memory = ConversationBufferWindowMemory(k=3, return_messages=True)
-# Rest of your code continues here...
-st.subheader("Chatbot with Langchain, ChatGPT, Pinecone, and Streamlit")
-system_msg_template = SystemMessagePromptTemplate.from_template(
-    template="""Answer the question as truthfully as possible using the provided context, and if the answer is not contained within the text below, say 'I don't know'"""
-)
-human_msg_template = HumanMessagePromptTemplate.from_template(template="{input}")
-prompt_template = ChatPromptTemplate.from_messages([system_msg_template, MessagesPlaceholder(variable_name="history"), human_msg_template])
-st.title("Langchain Chatbot")
-response_container = st.container()
-textcontainer = st.container()
-with textcontainer:
-    query = st.text_input("Query: ", key="input")
-with response_container:
-    if st.session_state['responses']:
-        for i in range(len(st.session_state['responses'])):
-            message(st.session_state['responses'][i], key=str(i))
-            if i < len(st.session_state['requests']):
-                message(st.session_state["requests"][i], is_user=True, key=str(i) + '_user')
-llm = ChatOpenAI(model_name="gpt-3.5-turbo", openai_api_key="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")
-conversation = ConversationChain(memory=st.session_state.buffer_memory, prompt=prompt_template, llm=llm, verbose=True)
-if query:
-    with st.spinner("typing..."):
-        context = "your_context_here"
-        response = conversation.predict(input=f"Context:\n {context} \n\n Query:\n{query}")
-    st.session_state.requests.append(query)
-    st.session_state.responses.append(response)
+
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+PINECONE_ENV = os.getenv('PINECONE_ENV')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+os.environ['OPENAI_API_KEY'] = OPENAI_API_KEY
+
+
+def doc_preprocessing():
+    loader = DirectoryLoader(
+        'data/',
+        glob='**/*.pdf',     # only the PDFs
+        show_progress=True
+    )
+    docs = loader.load()
+    text_splitter = CharacterTextSplitter(
+        chunk_size=1000, 
+        chunk_overlap=0
+    )
+    docs_split = text_splitter.split_documents(docs)
+    return docs_split
+
+@st.cache_resource
+def embedding_db():
+    # we use the openAI embedding model
+    embeddings = OpenAIEmbeddings()
+    pinecone.init(
+        api_key=PINECONE_API_KEY,
+        environment=PINECONE_ENV
+    )
+    docs_split = doc_preprocessing()
+    doc_db = Pinecone.from_documents(
+        docs_split, 
+        embeddings, 
+        index_name='langchain-demo-indexes'
+    )
+    return doc_db
+
+llm = ChatOpenAI()
+doc_db = embedding_db()
+
+def retrieval_answer(query):
+    qa = RetrievalQA.from_chain_type(
+    llm=llm, 
+    chain_type='stuff',
+    retriever=doc_db.as_retriever(),
+    )
+    query = query
+    result = qa.run(query)
+    return result
+
+def main():
+    st.title("Question and Answering App powered by LLM and Pinecone")
+
+    text_input = st.text_input("Ask your query...") 
+    if st.button("Ask Query"):
+        if len(text_input)>0:
+            st.info("Your Query: " + text_input)
+            answer = retrieval_answer(text_input)
+            st.success(answer)
+
+if __name__ == "__main__":
+    main()
 
 
 
